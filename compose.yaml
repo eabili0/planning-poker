@@ -1,0 +1,8 @@
+version: "3.5"
+
+services:
+  pp:
+    image: eabili0/planning-poker:alpine
+    build: .
+    ports:
+      - 80:80
