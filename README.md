@@ -4,7 +4,7 @@ Simple planning poker application. Golang backend on `be` folder and a React+Tai
 
 # build
 
-Run `docker-compose build` to build the `eabili0/planning-poker:alpine` Docker image. 
+Run `docker compose build` to build the `eabili0/planning-poker:alpine` Docker image. 
 
 You can retag the image if you like with `docker tag eabili0/planning-poker:alpine <your tag>` or by changing the image name in the `compose.yaml` file.
 
@@ -14,7 +14,7 @@ You can see how each one gets built by analyzing the `Dockerfile` in the root fo
 
 # run
 
-Simply run `docker-compose up -d`, this should launch the website behind port `80` by default.
+Simply run `docker compose up -d`, this should launch the website behind port `80` by default.
 
 # how-to-contribute
 
