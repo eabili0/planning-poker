@@ -1,6 +1,6 @@
 # planning-poker
 
-Simple planning poker application. Golang backend on `be` folder and a React+Tailwind frontend on `be`.
+Simple planning poker application. Golang backend on `be` folder and a React+Tailwind frontend on `fe`.
 
 # build
 
