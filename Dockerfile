@@ -33,6 +33,8 @@ RUN npm run build
 # Production stage
 FROM nginx:stable-alpine
 
+RUN apk add openssl
+
 # Copy built assets from build stage
 COPY --from=be-build /app/anjuna-planning-poker /backend
 COPY --from=fe-build /app/build /usr/share/nginx/html
