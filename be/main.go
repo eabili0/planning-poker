@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -31,7 +32,42 @@ var (
 	}
 )
 
+const (
+	tlsCertPath = "/opt/tls/server.crt"
+	tlsKeyPath  = "/opt/tls/server.key"
+)
+
 func main() {
+	// Create a new ServeMux
+	mux := http.NewServeMux()
+	mux.HandleFunc("/wss", handleWebSocket)
+
+	// Configure the TLS settings
+	tlsConfig := &tls.Config{
+		MinVersion:               tls.VersionTLS12,
+		CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
+		PreferServerCipherSuites: true,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		},
+	}
+
+	// Create a new http.Server with the TLS configuration
+	server := &http.Server{
+		Addr:      ":8443",
+		Handler:   mux,
+		TLSConfig: tlsConfig,
+	}
+
+	go func() {
+		log.Println("Server starting on :8443 with WSS support")
+		log.Fatal(server.ListenAndServeTLS(tlsCertPath, tlsKeyPath))
+	}()
+
 	http.HandleFunc("/ws", handleWebSocket)
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))

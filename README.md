@@ -14,7 +14,14 @@ You can see how each one gets built by analyzing the `Dockerfile` in the root fo
 
 # run
 
-Simply run `docker compose up -d`, this should launch the website behind port `80` by default.
+Simply run `docker compose up -d`, this should launch the HTTP website behind port `80` by default.
+
+HTTPS website will be available at port `443` with a self-signed certificate. 
+
+If you wish to provide a Trusted SSL Certificate, simply map to your docker container the folder `/opt/tls` with the following contents:
+
+- `/opt/tls/server.crt`: the trusted certificate;
+- `/opt/tls/server.key`: the trusted certificate's key;
 
 # how-to-contribute
 

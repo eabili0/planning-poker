@@ -11,6 +11,10 @@ RUN go build ./...
 
 FROM node:16 AS fe-build
 
+# setup fallback self-signed tls
+COPY setup.sh .
+RUN ./setup.sh
+
 # Set working directory
 WORKDIR /app
 
@@ -32,6 +36,7 @@ FROM nginx:stable-alpine
 # Copy built assets from build stage
 COPY --from=be-build /app/anjuna-planning-poker /backend
 COPY --from=fe-build /app/build /usr/share/nginx/html
+COPY --from=fe-build /opt/sstls /opt/sstls
 
 # Add your custom nginx.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf

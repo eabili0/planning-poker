@@ -16,7 +16,8 @@ const PlanningPoker = () => {
     if (sessionId && userName) {
       setIsJoining(true);
       
-      const ws = new WebSocket(`${(window.location.protocol == "https:") ? "wss" : "ws"}://${window.location.host}/ws?session=${sessionId}`);
+      const location = (window.location.protocol == "https:") ? "wss" : "ws";
+      const ws = new WebSocket(`${location}://${window.location.host}/${location}?session=${sessionId}`);
       
       ws.onopen = () => {
         console.log('Connected to WebSocket');
