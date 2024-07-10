@@ -11,8 +11,10 @@ import (
 )
 
 type Participant struct {
-	Name string `json:"name"`
-	Vote int    `json:"vote"`
+	Name     string `json:"name"`
+	Vote     int    `json:"vote"`
+	IsAdmin  bool   `json:"isAdmin"`
+	IsActive bool   `json:"isActive"`
 }
 
 type Session struct {
@@ -20,14 +22,14 @@ type Session struct {
 	Participants map[string]*Participant `json:"participants"`
 	Revealed     bool                    `json:"revealed"`
 	mutex        sync.Mutex
-	clients      map[*websocket.Conn]bool
+	clients      map[*websocket.Conn]string // Map WebSocket to participant name
 }
 
 var (
 	sessions = make(map[string]*Session)
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
-			return true // Allow all origins for this example
+			return true
 		},
 	}
 )
@@ -38,7 +40,6 @@ const (
 )
 
 func main() {
-	// Create a new ServeMux
 	mux := http.NewServeMux()
 	mux.HandleFunc("/wss", handleWebSocket)
 
@@ -75,8 +76,11 @@ func main() {
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session")
-	if sessionID == "" {
-		http.Error(w, "Missing session ID", http.StatusBadRequest)
+	name := r.URL.Query().Get("name")
+	isAdmin := r.URL.Query().Get("admin") == "true"
+
+	if sessionID == "" || name == "" {
+		http.Error(w, "Missing session ID or name", http.StatusBadRequest)
 		return
 	}
 
@@ -88,14 +92,33 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	session := getOrCreateSession(sessionID)
-	session.clients[conn] = true
+	session.mutex.Lock()
+	isNewUser := false
+	if _, exists := session.Participants[name]; !exists {
+		session.Participants[name] = &Participant{Name: name, IsAdmin: isAdmin, IsActive: true}
+		isNewUser = true
+	} else {
+		session.Participants[name].IsActive = true
+		session.Participants[name].IsAdmin = isAdmin
+	}
+	session.clients[conn] = name
+	session.mutex.Unlock()
+
+	// Broadcast updated session state to all clients if a new user joined
+	if isNewUser {
+		broadcastSessionState(session)
+	} else {
+		// Send initial state only to the current connection
+		sendSessionState(conn, session)
+	}
 
 	for {
-		messageType, p, err := conn.ReadMessage()
+		_, p, err := conn.ReadMessage()
 		if err != nil {
 			log.Println(err)
-			delete(session.clients, conn)
-			break
+			removeParticipant(session, name)
+			broadcastSessionState(session) // Broadcast update when a user disconnects
+			return
 		}
 
 		var message map[string]interface{}
@@ -105,17 +128,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch message["type"] {
-		case "join":
-			handleJoin(session, message)
 		case "vote":
-			handleVote(session, message)
+			handleVote(session, name, int(message["vote"].(float64)))
 		case "reveal":
-			handleReveal(session)
+			handleReveal(session, name)
 		case "reset":
-			handleReset(session)
+			handleReset(session, name)
+		case "remove":
+			handleRemove(session, name, message["targetName"].(string))
+		case "cleanup":
+			handleCleanup(session, name)
+		case "ping":
+			// Respond to ping with a pong
+			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`))
+			continue // Skip broadcasting for pings
 		}
 
-		session.broadcastState(messageType)
+		broadcastSessionState(session)
 	}
 }
 
@@ -126,61 +155,86 @@ func getOrCreateSession(id string) *Session {
 	session := &Session{
 		ID:           id,
 		Participants: make(map[string]*Participant),
-		clients:      make(map[*websocket.Conn]bool),
+		clients:      make(map[*websocket.Conn]string),
 	}
 	sessions[id] = session
 	return session
 }
 
-func handleJoin(session *Session, message map[string]interface{}) {
-	name, ok := message["name"].(string)
-	if !ok {
-		return
-	}
+func handleVote(session *Session, name string, vote int) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	session.Participants[name] = &Participant{Name: name}
+	if participant, exists := session.Participants[name]; exists && !participant.IsAdmin {
+		participant.Vote = vote
+	}
 }
 
-func handleVote(session *Session, message map[string]interface{}) {
-	name, ok1 := message["name"].(string)
-	vote, ok2 := message["vote"].(float64)
-	if !ok1 || !ok2 {
-		return
+func handleReveal(session *Session, name string) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
+		session.Revealed = true
 	}
+}
+
+func handleReset(session *Session, name string) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
+		session.Revealed = false
+		for _, p := range session.Participants {
+			p.Vote = 0
+		}
+	}
+}
+
+func handleRemove(session *Session, adminName, targetName string) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	if admin, exists := session.Participants[adminName]; exists && admin.IsAdmin {
+		delete(session.Participants, targetName)
+	}
+}
+
+func handleCleanup(session *Session, name string) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
+		for name, p := range session.Participants {
+			if !p.IsActive {
+				delete(session.Participants, name)
+			}
+		}
+	}
+}
+
+func removeParticipant(session *Session, name string) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
 	if participant, exists := session.Participants[name]; exists {
-		participant.Vote = int(vote)
+		participant.IsActive = false
 	}
-}
-
-func handleReveal(session *Session) {
-	session.mutex.Lock()
-	defer session.mutex.Unlock()
-	session.Revealed = true
-}
-
-func handleReset(session *Session) {
-	session.mutex.Lock()
-	defer session.mutex.Unlock()
-	session.Revealed = false
-	for _, participant := range session.Participants {
-		participant.Vote = 0
-	}
-}
-
-func (s *Session) broadcastState(messageType int) {
-	s.mutex.Lock()
-	state, _ := json.Marshal(s)
-	s.mutex.Unlock()
-
-	for client := range s.clients {
-		err := client.WriteMessage(messageType, state)
-		if err != nil {
-			log.Println(err)
-			client.Close()
-			delete(s.clients, client)
+	// Remove the participant's connection from the clients map
+	for conn, participantName := range session.clients {
+		if participantName == name {
+			delete(session.clients, conn)
+			break
 		}
+	}
+}
+
+func sendSessionState(conn *websocket.Conn, session *Session) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	state, _ := json.Marshal(session)
+	conn.WriteMessage(websocket.TextMessage, state)
+}
+
+func broadcastSessionState(session *Session) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+	state, _ := json.Marshal(session)
+	for conn := range session.clients {
+		conn.WriteMessage(websocket.TextMessage, state)
 	}
 }
