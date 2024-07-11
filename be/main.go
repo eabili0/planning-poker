@@ -12,10 +12,11 @@ import (
 
 type Participant struct {
 	Name     string `json:"name"`
-	Vote     int    `json:"vote"`
+	Vote     int    `json:"vote"`  // -1 represents "No Vote/Question"
 	IsAdmin  bool   `json:"isAdmin"`
 	IsActive bool   `json:"isActive"`
 }
+
 
 type Session struct {
 	ID           string                  `json:"id"`
@@ -95,7 +96,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	session.mutex.Lock()
 	isNewUser := false
 	if _, exists := session.Participants[name]; !exists {
-		session.Participants[name] = &Participant{Name: name, IsAdmin: isAdmin, IsActive: true}
+		session.Participants[name] = &Participant{Name: name, IsAdmin: isAdmin, IsActive: true, Vote: 0}
 		isNewUser = true
 	} else {
 		session.Participants[name].IsActive = true
@@ -112,13 +113,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		sendSessionState(conn, session)
 	}
 
+	defer func() {
+		removeParticipant(session, name)
+		broadcastSessionState(session) // Broadcast update when a user disconnects
+	}()
+
 	for {
 		_, p, err := conn.ReadMessage()
 		if err != nil {
-			log.Println(err)
-			removeParticipant(session, name)
-			broadcastSessionState(session) // Broadcast update when a user disconnects
-			return
+			log.Println("Read error: ", err)
+			return // This will trigger the deferred removeParticipant call
 		}
 
 		var message map[string]interface{}
@@ -129,7 +133,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		switch message["type"] {
 		case "vote":
-			handleVote(session, name, int(message["vote"].(float64)))
+			handleVote(session, name, message["vote"])
 		case "reveal":
 			handleReveal(session, name)
 		case "reset":
@@ -161,11 +165,18 @@ func getOrCreateSession(id string) *Session {
 	return session
 }
 
-func handleVote(session *Session, name string, vote int) {
+func handleVote(session *Session, name string, voteValue interface{}) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
 	if participant, exists := session.Participants[name]; exists && !participant.IsAdmin {
-		participant.Vote = vote
+		switch v := voteValue.(type) {
+		case float64:
+			participant.Vote = int(v)
+		case string:
+			if v == "no-vote" {
+				participant.Vote = -1
+			}
+		}
 	}
 }
 
@@ -183,7 +194,7 @@ func handleReset(session *Session, name string) {
 	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
 		session.Revealed = false
 		for _, p := range session.Participants {
-			p.Vote = 0
+			p.Vote = 0  // Reset vote to 0, which represents "Not voted"
 		}
 	}
 }
@@ -211,13 +222,15 @@ func handleCleanup(session *Session, name string) {
 func removeParticipant(session *Session, name string) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	if participant, exists := session.Participants[name]; exists {
-		participant.IsActive = false
-	}
+	
+	// Fully remove the participant from the session
+	delete(session.Participants, name)
+	
 	// Remove the participant's connection from the clients map
 	for conn, participantName := range session.clients {
 		if participantName == name {
 			delete(session.clients, conn)
+			conn.Close() // Ensure the connection is closed
 			break
 		}
 	}

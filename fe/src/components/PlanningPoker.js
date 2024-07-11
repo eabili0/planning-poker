@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Users, RefreshCw, Trash2 } from 'lucide-react';
+import { Users, RefreshCw, Trash2, HelpCircle } from 'lucide-react';
 
 const PlanningPoker = () => {
   const [sessionId, setSessionId] = useState('');
@@ -38,6 +38,11 @@ const PlanningPoker = () => {
           clearTimeout(pingTimeoutRef.current);
         } else {
           setSession(data);
+          // Check if current user has been removed from the session
+          if (!data.participants[userName]) {
+            ws.close();
+            setSession(null);
+          }
         }
       };
 
@@ -119,7 +124,7 @@ const PlanningPoker = () => {
   };
 
   const calculateAverage = () => {
-    if (!session || !session.participants || !session.revealed ) return 'N/A';
+    if (!session || !session.participants || !session.revealed) return 'N/A';
     const votes = Object.values(session.participants)
       .filter(p => !p.isAdmin && p.vote > 0)
       .map(p => p.vote);
@@ -131,6 +136,12 @@ const PlanningPoker = () => {
     if (sessionId && userName) {
       connectWebSocket();
     }
+  };
+
+  const renderVoteValue = (vote) => {
+    if (vote === 0) return 'Not voted';
+    if (vote === -1) return 'No Vote / Question';
+    return vote;
   };
 
   if (!session) {
@@ -187,44 +198,51 @@ const PlanningPoker = () => {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {session && session.participants && Object.entries(session.participants).filter(([_, participant]) => participant.isActive).map(([name, participant]) => (
-              <Card key={name}>
-                <CardHeader>
-                  <CardTitle className="flex justify-between items-center">
-                    {name}
-                    {currentUser && currentUser.isAdmin && name !== userName && (
-                      <Button onClick={() => removeParticipant(name)} variant="ghost" size="sm">
-                        <Trash2 size={16} />
-                      </Button>
-                    )}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {participant.isAdmin ? (
-                    <div className="text-xl font-bold">Observer</div>
-                  ) : session.revealed || name === userName ? (
-                    <div className="text-2xl font-bold">{participant.vote || 'Not voted'}</div>
-                  ) : (
-                    <div className="text-2xl font-bold">{participant.vote ? 'Voted' : 'Not voted'}</div>
-                  )}
-                  {name === userName && !participant.isAdmin && !session.revealed && (
-                    <div className="grid grid-cols-3 gap-2 mt-2">
-                      {[1, 2, 3, 5, 8, 13].map((value) => (
-                        <Button
-                          key={value}
-                          onClick={() => castVote(value)}
-                          variant={participant.vote === value ? 'default' : 'outline'}
-                        >
-                          {value}
-                        </Button>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {session && session.participants && Object.entries(session.participants).map(([name, participant]) => (
+          <Card key={name}>
+            <CardHeader>
+              <CardTitle className="flex justify-between items-center">
+                {name}
+                {currentUser && currentUser.isAdmin && name !== userName && (
+                  <Button onClick={() => removeParticipant(name)} variant="ghost" size="sm">
+                    <Trash2 size={16} />
+                  </Button>
+                )}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {participant.isAdmin ? (
+                <div className="text-xl font-bold">Observer</div>
+              ) : session.revealed || name === userName ? (
+                <div className="text-2xl font-bold">{renderVoteValue(participant.vote)}</div>
+              ) : (
+                <div className="text-2xl font-bold">{participant.vote !== 0 ? 'Voted' : 'Not voted'}</div>
+              )}
+              {name === userName && !participant.isAdmin && !session.revealed && (
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  {[1, 2, 3, 5, 8, 13].map((value) => (
+                    <Button
+                      key={value}
+                      onClick={() => castVote(value)}
+                      variant={participant.vote === value ? 'default' : 'outline'}
+                    >
+                      {value}
+                    </Button>
+                  ))}
+                  <Button
+                    onClick={() => castVote(-1)}
+                    variant={participant.vote === -1 ? 'default' : 'outline'}
+                    className="col-span-3"
+                  >
+                    <HelpCircle className="mr-2" /> No Vote / Question
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
         </CardContent>
       </Card>
         <div className="flex justify-between items-center">
