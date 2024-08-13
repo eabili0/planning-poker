@@ -268,14 +268,6 @@ const PlanningPoker = () => {
                   required
                 />
               </div>
-              <div className="flex items-center space-x-2">
-                <Switch
-                  id="isAdmin"
-                  checked={localRole}
-                  onCheckedChange={setLocalRole}
-                />
-                <Label htmlFor="isAdmin">Join as Observer/Admin</Label>
-              </div>
               <Button type="submit" disabled={isJoining}>
                 {isJoining ? 'Joining...' : 'Join Session'}
               </Button>
