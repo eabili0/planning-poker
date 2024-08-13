@@ -3,27 +3,30 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
 type Participant struct {
+	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Vote     int    `json:"vote"`  // -1 represents "No Vote/Question"
+	Vote     int    `json:"vote"`
 	IsAdmin  bool   `json:"isAdmin"`
 	IsActive bool   `json:"isActive"`
 }
-
 
 type Session struct {
 	ID           string                  `json:"id"`
 	Participants map[string]*Participant `json:"participants"`
 	Revealed     bool                    `json:"revealed"`
 	mutex        sync.Mutex
-	clients      map[*websocket.Conn]string // Map WebSocket to participant name
+	clients      map[*websocket.Conn]string
 }
 
 var (
@@ -32,6 +35,7 @@ var (
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
+		HandshakeTimeout: 10 * time.Second,
 	}
 )
 
@@ -44,7 +48,6 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/wss", handleWebSocket)
 
-	// Configure the TLS settings
 	tlsConfig := &tls.Config{
 		MinVersion:               tls.VersionTLS12,
 		CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
@@ -58,7 +61,6 @@ func main() {
 		},
 	}
 
-	// Create a new http.Server with the TLS configuration
 	server := &http.Server{
 		Addr:      ":8443",
 		Handler:   mux,
@@ -78,77 +80,108 @@ func main() {
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session")
 	name := r.URL.Query().Get("name")
+	participantID := r.URL.Query().Get("id")
 	isAdmin := r.URL.Query().Get("admin") == "true"
 
 	if sessionID == "" || name == "" {
+		log.Printf("Missing session ID or name: %s, %s", sessionID, name)
 		http.Error(w, "Missing session ID or name", http.StatusBadRequest)
 		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
 
+	log.Printf("New WebSocket connection: %s, %s, %s", sessionID, name, participantID)
+
 	session := getOrCreateSession(sessionID)
 	session.mutex.Lock()
-	isNewUser := false
-	if _, exists := session.Participants[name]; !exists {
-		session.Participants[name] = &Participant{Name: name, IsAdmin: isAdmin, IsActive: true, Vote: 0}
-		isNewUser = true
-	} else {
-		session.Participants[name].IsActive = true
-		session.Participants[name].IsAdmin = isAdmin
+
+	if participantID == "" {
+		participantID = uuid.New().String()
 	}
-	session.clients[conn] = name
+
+	if _, exists := session.Participants[participantID]; !exists {
+		session.Participants[participantID] = &Participant{ID: participantID, Name: name, IsAdmin: isAdmin, IsActive: true, Vote: 0}
+	} else {
+		session.Participants[participantID].Name = name
+		session.Participants[participantID].IsActive = true
+		session.Participants[participantID].IsAdmin = isAdmin
+	}
+	session.clients[conn] = participantID
 	session.mutex.Unlock()
 
-	// Broadcast updated session state to all clients if a new user joined
-	if isNewUser {
-		broadcastSessionState(session)
-	} else {
-		// Send initial state only to the current connection
-		sendSessionState(conn, session)
+	// Send initial session state
+	if err := sendSessionState(conn, session); err != nil {
+		log.Printf("Failed to send initial session state: %v", err)
+		return
 	}
 
+	broadcastSessionState(session)
+
 	defer func() {
-		removeParticipant(session, name)
-		broadcastSessionState(session) // Broadcast update when a user disconnects
+		removeParticipant(session, participantID)
+		broadcastSessionState(session)
+		log.Printf("WebSocket connection closed: %s, %s", sessionID, participantID)
 	}()
 
+	conn.SetReadLimit(1024) // Increased read limit
+
 	for {
-		_, p, err := conn.ReadMessage()
+		messageType, p, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Read error: ", err)
-			return // This will trigger the deferred removeParticipant call
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("Unexpected WebSocket close error: %v", err)
+			}
+			return
+		}
+
+		if messageType != websocket.TextMessage {
+			log.Printf("Received non-text message: %d", messageType)
+			continue
 		}
 
 		var message map[string]interface{}
 		if err := json.Unmarshal(p, &message); err != nil {
-			log.Println(err)
+			log.Printf("Failed to unmarshal message: %v", err)
 			continue
 		}
 
+		log.Printf("Received message: %v", message)
+
 		switch message["type"] {
 		case "vote":
-			handleVote(session, name, message["vote"])
+			handleVote(session, participantID, message["vote"])
 		case "reveal":
-			handleReveal(session, name)
+			handleReveal(session, participantID)
 		case "reset":
-			handleReset(session, name)
+			handleReset(session, participantID)
 		case "remove":
-			handleRemove(session, name, message["targetName"].(string))
+			handleRemove(session, participantID, message["targetId"].(string))
 		case "cleanup":
-			handleCleanup(session, name)
+			handleCleanup(session, participantID)
+		case "changeName":
+			handleChangeName(session, participantID, message["newName"].(string), conn)
+		case "changeRole":
+			handleRoleChange(session, participantID, message["newRole"].(bool), conn)
 		case "ping":
-			// Respond to ping with a pong
-			conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`))
-			continue // Skip broadcasting for pings
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`)); err != nil {
+				log.Printf("Failed to send pong: %v", err)
+				return
+			}
+			continue
+		default:
+			log.Printf("Unknown message type: %v", message["type"])
 		}
 
-		broadcastSessionState(session)
+		if err := broadcastSessionState(session); err != nil {
+			log.Printf("Failed to broadcast session state: %v", err)
+			return
+		}
 	}
 }
 
@@ -165,10 +198,10 @@ func getOrCreateSession(id string) *Session {
 	return session
 }
 
-func handleVote(session *Session, name string, voteValue interface{}) {
+func handleVote(session *Session, participantID string, voteValue interface{}) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	if participant, exists := session.Participants[name]; exists && !participant.IsAdmin {
+	if participant, exists := session.Participants[participantID]; exists && !participant.IsAdmin {
 		switch v := voteValue.(type) {
 		case float64:
 			participant.Vote = int(v)
@@ -180,74 +213,130 @@ func handleVote(session *Session, name string, voteValue interface{}) {
 	}
 }
 
-func handleReveal(session *Session, name string) {
+func handleReveal(session *Session, participantID string) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
+	if participant, exists := session.Participants[participantID]; exists && participant.IsAdmin {
 		session.Revealed = true
 	}
 }
 
-func handleReset(session *Session, name string) {
+func handleReset(session *Session, participantID string) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
+	if participant, exists := session.Participants[participantID]; exists && participant.IsAdmin {
 		session.Revealed = false
 		for _, p := range session.Participants {
-			p.Vote = 0  // Reset vote to 0, which represents "Not voted"
+			p.Vote = 0
 		}
 	}
 }
 
-func handleRemove(session *Session, adminName, targetName string) {
+func handleRemove(session *Session, adminID, targetID string) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	if admin, exists := session.Participants[adminName]; exists && admin.IsAdmin {
-		delete(session.Participants, targetName)
+	if admin, exists := session.Participants[adminID]; exists && admin.IsAdmin {
+		delete(session.Participants, targetID)
 	}
 }
 
-func handleCleanup(session *Session, name string) {
+func handleCleanup(session *Session, participantID string) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	if participant, exists := session.Participants[name]; exists && participant.IsAdmin {
-		for name, p := range session.Participants {
+	if participant, exists := session.Participants[participantID]; exists && participant.IsAdmin {
+		for id, p := range session.Participants {
 			if !p.IsActive {
-				delete(session.Participants, name)
+				delete(session.Participants, id)
 			}
 		}
 	}
 }
 
-func removeParticipant(session *Session, name string) {
+func handleChangeName(session *Session, participantID, newName string, conn *websocket.Conn) {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	
-	// Fully remove the participant from the session
-	delete(session.Participants, name)
-	
-	// Remove the participant's connection from the clients map
-	for conn, participantName := range session.clients {
-		if participantName == name {
+
+	if participant, exists := session.Participants[participantID]; exists {
+		participant.Name = newName
+		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"nameChangeConfirmation","newName":"%s"}`, newName)))
+	}
+}
+
+func handleRoleChange(session *Session, participantID string, newRole bool, conn *websocket.Conn) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	if participant, exists := session.Participants[participantID]; exists {
+		participant.IsAdmin = newRole
+		log.Printf("Role changed for participant %s to admin: %v", participantID, newRole)
+
+		// Send confirmation to the client
+		confirmation := map[string]interface{}{
+			"type":    "roleChangeConfirmation",
+			"newRole": newRole,
+		}
+		confirmationJSON, err := json.Marshal(confirmation)
+		if err != nil {
+			log.Printf("Failed to marshal role change confirmation: %v", err)
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, confirmationJSON); err != nil {
+			log.Printf("Failed to send role change confirmation: %v", err)
+			return
+		}
+	} else {
+		log.Printf("Participant %s not found for role change", participantID)
+	}
+}
+
+func boolToString(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func removeParticipant(session *Session, participantID string) {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	delete(session.Participants, participantID)
+
+	for conn, id := range session.clients {
+		if id == participantID {
 			delete(session.clients, conn)
-			conn.Close() // Ensure the connection is closed
+			conn.Close()
 			break
 		}
 	}
 }
 
-func sendSessionState(conn *websocket.Conn, session *Session) {
+func sendSessionState(conn *websocket.Conn, session *Session) error {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	state, _ := json.Marshal(session)
-	conn.WriteMessage(websocket.TextMessage, state)
+	state, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, state); err != nil {
+		return fmt.Errorf("failed to send session state: %v", err)
+	}
+	return nil
 }
 
-func broadcastSessionState(session *Session) {
+func broadcastSessionState(session *Session) error {
 	session.mutex.Lock()
 	defer session.mutex.Unlock()
-	state, _ := json.Marshal(session)
-	for conn := range session.clients {
-		conn.WriteMessage(websocket.TextMessage, state)
+	state, err := json.Marshal(session)
+	if err != nil {
+		return fmt.Errorf("failed to marshal session state: %v", err)
 	}
+	for conn := range session.clients {
+		if err := conn.WriteMessage(websocket.TextMessage, state); err != nil {
+			log.Printf("Failed to send session state to a client: %v", err)
+			delete(session.clients, conn)
+			conn.Close()
+		}
+	}
+	return nil
 }
